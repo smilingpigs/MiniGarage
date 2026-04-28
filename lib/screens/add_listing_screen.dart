@@ -77,52 +77,77 @@ class _AddListingScreenState extends State<AddListingScreen> {
     if (imageBytesList.isEmpty) return;
     setState(() => isAnalyzing = true);
 
-    try {
-      final model = GenerativeModel(
-        model: 'gemini-1.5-flash',
-        apiKey: dotenv.env['GEMINI_API_KEY']!,
-      );
+    // --- SETTINGS FOR RELIABILITY ---
+    const int maxRetries = 3;
+    int retryCount = 0;
+    bool success = false;
 
-      // UPDATED PROMPT: Added is_fantasy detection
-      final prompt = TextPart(
-        "Identify this die-cast car. Return JSON: "
-        "{'brand': 'string', 'title': 'string', 'scale': 'string', 'subcategory': 'string', 'is_fantasy': bool}. "
-        "The 'subcategory' is the series name like 'Muscle Mania'. Set 'is_fantasy' to true if it is a concept or non-real-world car. Only return JSON.",
-      );
+    while (retryCount < maxRetries && !success) {
+      try {
+        // Switch to 'lite' for better availability during high demand
+        final model = GenerativeModel(
+          model: 'gemini-2.5-flash-lite',
+          apiKey: dotenv.env['GEMINI_API_KEY']!,
+        );
 
-      final imagePart = DataPart('image/jpeg', imageBytesList.first);
-      final response = await model.generateContent([Content.multi([prompt, imagePart])]);
+        final prompt = TextPart(
+          "Identify this die-cast car. Return JSON: "
+          "{'brand': 'string', 'title': 'string', 'scale': 'string', 'subcategory': 'string', 'is_fantasy': bool}. "
+          "The 'subcategory' is the series name like 'Muscle Mania'. Only return JSON.",
+        );
 
-      if (response.text == null) return;
-      final String cleanJson = response.text!.replaceAll('```json', '').replaceAll('```', '').trim();
-      final Map<String, dynamic> result = jsonDecode(cleanJson);
+        final imagePart = DataPart('image/jpeg', imageBytesList.first);
+        final response = await model.generateContent([
+          Content.multi([prompt, imagePart]),
+        ]);
 
-      setState(() {
-        titleController.text = result['title'] ?? "";
-        subcategoryController.text = result['subcategory'] ?? "";
-        isFantasy = result['is_fantasy'] ?? false; // Auto-detect Fantasy status
+        if (response.text == null) throw Exception("Empty response");
 
-        if (['1:64', '1:43', '1:24', '1:18'].contains(result['scale'])) {
-          selectedScale = result['scale'];
-        }
+        final String cleanJson = response.text!
+            .replaceAll('```json', '')
+            .replaceAll('```', '')
+            .trim();
+        final Map<String, dynamic> result = jsonDecode(cleanJson);
 
-        String detectedBrand = result['brand'] ?? "";
-        bool brandExists = availableBrands.any((b) => b.toLowerCase() == detectedBrand.toLowerCase());
+        setState(() {
+          titleController.text = result['title'] ?? "";
+          subcategoryController.text = result['subcategory'] ?? "";
+          isFantasy = result['is_fantasy'] ?? false;
 
-        if (brandExists) {
-          selectedBrand = availableBrands.firstWhere((b) => b.toLowerCase() == detectedBrand.toLowerCase());
-          isOtherSelected = false;
+          // Match brand logic
+          String detectedBrand = result['brand'] ?? "";
+          bool brandExists = availableBrands.any(
+            (b) => b.toLowerCase() == detectedBrand.toLowerCase(),
+          );
+          if (brandExists) {
+            selectedBrand = availableBrands.firstWhere(
+              (b) => b.toLowerCase() == detectedBrand.toLowerCase(),
+            );
+            isOtherSelected = false;
+          } else {
+            selectedBrand = "Other";
+            isOtherSelected = true;
+            otherBrandController.text = detectedBrand;
+          }
+        });
+
+        success = true; // Break the loop
+      } catch (e) {
+        retryCount++;
+        if (e.toString().contains('503') && retryCount < maxRetries) {
+          // Wait 2 seconds before retrying
+          await Future.delayed(const Duration(seconds: 2));
         } else {
-          selectedBrand = "Other";
-          isOtherSelected = true;
-          otherBrandController.text = detectedBrand;
+          print("AI Scan Error: $e");
+          _showError(
+            "AI Scan failed. Servers are busy, please try once more or fill manually.",
+          );
+          break;
         }
-      });
-    } catch (e) {
-      _showError("AI Scan failed. Please fill manually.");
-    } finally {
-      setState(() => isAnalyzing = false);
+      }
     }
+
+    setState(() => isAnalyzing = false);
   }
 
   Future<void> pickImages() async {
@@ -142,11 +167,16 @@ class _AddListingScreenState extends State<AddListingScreen> {
     final String title = titleController.text.trim();
     final int? price = int.tryParse(priceController.text.trim());
     final String phone = phoneController.text.trim();
-    final String finalBrand = isOtherSelected ? otherBrandController.text.trim() : (selectedBrand ?? "");
-    
+    final String finalBrand = isOtherSelected
+        ? otherBrandController.text.trim()
+        : (selectedBrand ?? "");
+
     // VALIDATION: Price and Phone are optional if the status is 'private'
     bool isPrivate = selectedStatus == 'private';
-    if (imageBytesList.isEmpty || title.isEmpty || finalBrand.isEmpty || (!isPrivate && (price == null || phone.isEmpty))) {
+    if (imageBytesList.isEmpty ||
+        title.isEmpty ||
+        finalBrand.isEmpty ||
+        (!isPrivate && (price == null || phone.isEmpty))) {
       _showError("Please complete all required fields.");
       return;
     }
@@ -157,11 +187,16 @@ class _AddListingScreenState extends State<AddListingScreen> {
       List<String> uploadedUrls = [];
       for (int i = 0; i < imageBytesList.length; i++) {
         final fileName = '${DateTime.now().millisecondsSinceEpoch}_$i.jpg';
-        await supabase.storage.from('listing-images').uploadBinary(
-          fileName, imageBytesList[i],
-          fileOptions: const FileOptions(contentType: 'image/jpeg'),
+        await supabase.storage
+            .from('listing-images')
+            .uploadBinary(
+              fileName,
+              imageBytesList[i],
+              fileOptions: const FileOptions(contentType: 'image/jpeg'),
+            );
+        uploadedUrls.add(
+          supabase.storage.from('listing-images').getPublicUrl(fileName),
         );
-        uploadedUrls.add(supabase.storage.from('listing-images').getPublicUrl(fileName));
       }
 
       await supabase.from('listings').insert({
@@ -194,7 +229,10 @@ class _AddListingScreenState extends State<AddListingScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xFF0F0F0F),
-      appBar: AppBar(title: const Text("ADD TO GARAGE"), backgroundColor: Colors.transparent),
+      appBar: AppBar(
+        title: const Text("ADD TO GARAGE"),
+        backgroundColor: Colors.transparent,
+      ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(24),
         child: Center(
@@ -210,16 +248,22 @@ class _AddListingScreenState extends State<AddListingScreen> {
                   value: selectedStatus,
                   dropdownColor: Colors.grey[900],
                   decoration: _inputDecoration("Garage Status"),
-                  items: statusOptions.map((s) => DropdownMenuItem(
-                    value: s,
-                    child: Text(
-                      s.toUpperCase().replaceAll('_', ' '),
-                      style: TextStyle(
-                        color: s == 'private' ? Colors.grey : Colors.blueAccent,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  )).toList(),
+                  items: statusOptions
+                      .map(
+                        (s) => DropdownMenuItem(
+                          value: s,
+                          child: Text(
+                            s.toUpperCase().replaceAll('_', ' '),
+                            style: TextStyle(
+                              color: s == 'private'
+                                  ? Colors.grey
+                                  : Colors.blueAccent,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      )
+                      .toList(),
                   onChanged: (val) => setState(() => selectedStatus = val!),
                 ),
 
@@ -227,8 +271,14 @@ class _AddListingScreenState extends State<AddListingScreen> {
 
                 // NEW: Fantasy Toggle
                 SwitchListTile(
-                  title: const Text("Fantasy / Concept Car", style: TextStyle(color: Colors.white)),
-                  subtitle: const Text("Mark as non-real-world theme", style: TextStyle(color: Colors.grey, fontSize: 12)),
+                  title: const Text(
+                    "Fantasy / Concept Car",
+                    style: TextStyle(color: Colors.white),
+                  ),
+                  subtitle: const Text(
+                    "Mark as non-real-world theme",
+                    style: TextStyle(color: Colors.grey, fontSize: 12),
+                  ),
                   value: isFantasy,
                   activeColor: Colors.blueAccent,
                   onChanged: (val) => setState(() => isFantasy = val),
@@ -236,10 +286,15 @@ class _AddListingScreenState extends State<AddListingScreen> {
 
                 const SizedBox(height: 15),
 
-                _buildDropdown("Brand", availableBrands, selectedBrand, (val) => setState(() {
-                  selectedBrand = val;
-                  isOtherSelected = (val == "Other");
-                })),
+                _buildDropdown(
+                  "Brand",
+                  availableBrands,
+                  selectedBrand,
+                  (val) => setState(() {
+                    selectedBrand = val;
+                    isOtherSelected = (val == "Other");
+                  }),
+                ),
 
                 if (isOtherSelected) ...[
                   const SizedBox(height: 15),
@@ -247,36 +302,66 @@ class _AddListingScreenState extends State<AddListingScreen> {
                 ],
 
                 const SizedBox(height: 15),
-                _buildTextField(titleController, "Model Name (e.g. Porsche 911)"),
-                
+                _buildTextField(
+                  titleController,
+                  "Model Name (e.g. Porsche 911)",
+                ),
+
                 const SizedBox(height: 15),
-                _buildTextField(subcategoryController, "Series / Sub-series (e.g. Exoticas)"),
+                _buildTextField(
+                  subcategoryController,
+                  "Series / Sub-series (e.g. Exoticas)",
+                ),
 
                 const SizedBox(height: 15),
                 Row(
                   children: [
-                    Expanded(child: _buildTextField(priceController, "Price (₹)", isNumber: true)),
+                    Expanded(
+                      child: _buildTextField(
+                        priceController,
+                        "Price (₹)",
+                        isNumber: true,
+                      ),
+                    ),
                     const SizedBox(width: 15),
                     Expanded(
-                      child: _buildDropdown("Scale", ['1:64', '1:43', '1:24', '1:18'], selectedScale, (val) => setState(() => selectedScale = val)),
+                      child: _buildDropdown(
+                        "Scale",
+                        ['1:64', '1:43', '1:24', '1:18'],
+                        selectedScale,
+                        (val) => setState(() => selectedScale = val),
+                      ),
                     ),
                   ],
                 ),
 
                 const SizedBox(height: 15),
-                _buildDropdown("Condition", conditionOptions, selectedCondition, (val) => setState(() => selectedCondition = val!)),
+                _buildDropdown(
+                  "Condition",
+                  conditionOptions,
+                  selectedCondition,
+                  (val) => setState(() => selectedCondition = val!),
+                ),
 
                 const SizedBox(height: 15),
-                _buildTextField(phoneController, "WhatsApp Number", isNumber: true),
-                
+                _buildTextField(
+                  phoneController,
+                  "WhatsApp Number",
+                  isNumber: true,
+                ),
+
                 const SizedBox(height: 40),
                 SizedBox(
                   width: double.infinity,
                   height: 60,
                   child: ElevatedButton(
                     onPressed: isUploading ? null : uploadListing,
-                    style: ElevatedButton.styleFrom(backgroundColor: Colors.blueAccent),
-                    child: isUploading ? const CircularProgressIndicator(color: Colors.white) : const Text("ADD TO GARAGE"),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.blueAccent,
+                    ),
+                    child: isUploading
+                        ? const CircularProgressIndicator(color: Colors.white)
+                        : const Text("ADD TO GARAGE"),
                   ),
                 ),
               ],
@@ -301,7 +386,13 @@ class _AddListingScreenState extends State<AddListingScreen> {
             border: Border.all(color: Colors.white10),
           ),
           child: imageBytesList.isEmpty
-              ? const Center(child: Icon(Icons.add_a_photo, size: 50, color: Colors.blueAccent))
+              ? const Center(
+                  child: Icon(
+                    Icons.add_a_photo,
+                    size: 50,
+                    color: Colors.blueAccent,
+                  ),
+                )
               : PageView.builder(
                   itemCount: imageBytesList.length,
                   itemBuilder: (context, i) => ClipRRect(
@@ -319,7 +410,14 @@ class _AddListingScreenState extends State<AddListingScreen> {
             onPressed: isAnalyzing ? null : autoFillWithAI,
             backgroundColor: Colors.blueAccent,
             icon: isAnalyzing
-                ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                      color: Colors.white,
+                      strokeWidth: 2,
+                    ),
+                  )
                 : const Icon(Icons.auto_awesome, size: 18),
             label: Text(isAnalyzing ? "ANALYZING..." : "AI AUTO-FILL"),
           ),
@@ -327,14 +425,25 @@ class _AddListingScreenState extends State<AddListingScreen> {
     ],
   );
 
-  Widget _buildDropdown(String label, List<String> items, String? value, ValueChanged<String?> onChanged) => 
-    DropdownButtonFormField<String>(
-      value: items.contains(value) ? value : (items.isNotEmpty ? items[0] : null),
-      dropdownColor: Colors.grey[900],
-      decoration: _inputDecoration(label),
-      items: items.map((brand) => DropdownMenuItem(value: brand, child: Text(brand, style: const TextStyle(color: Colors.white)))).toList(),
-      onChanged: onChanged,
-    );
+  Widget _buildDropdown(
+    String label,
+    List<String> items,
+    String? value,
+    ValueChanged<String?> onChanged,
+  ) => DropdownButtonFormField<String>(
+    value: items.contains(value) ? value : (items.isNotEmpty ? items[0] : null),
+    dropdownColor: Colors.grey[900],
+    decoration: _inputDecoration(label),
+    items: items
+        .map(
+          (brand) => DropdownMenuItem(
+            value: brand,
+            child: Text(brand, style: const TextStyle(color: Colors.white)),
+          ),
+        )
+        .toList(),
+    onChanged: onChanged,
+  );
 
   InputDecoration _inputDecoration(String label) => InputDecoration(
     labelText: label,
@@ -344,7 +453,11 @@ class _AddListingScreenState extends State<AddListingScreen> {
     labelStyle: const TextStyle(color: Colors.grey),
   );
 
-  Widget _buildTextField(TextEditingController controller, String label, {bool isNumber = false}) => TextField(
+  Widget _buildTextField(
+    TextEditingController controller,
+    String label, {
+    bool isNumber = false,
+  }) => TextField(
     controller: controller,
     keyboardType: isNumber ? TextInputType.number : TextInputType.text,
     style: const TextStyle(color: Colors.white),
