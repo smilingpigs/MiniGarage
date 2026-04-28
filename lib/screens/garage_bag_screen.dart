@@ -1,26 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:mini_garage/data/garage_data.dart';
 import 'package:url_launcher/url_launcher.dart';
-
-class CartItem {
-  final String id;
-  final String title;
-  final int price;
-  final String imageUrl;
-  final String sellerPhone;
-  final String scale;
-
-  CartItem({
-    required this.id,
-    required this.title,
-    required this.price,
-    required this.imageUrl,
-    required this.sellerPhone,
-    required this.scale,
-  });
-}
-
-// Temporary global list for testing
-List<CartItem> garageBag = [];
 
 class GarageBagScreen extends StatefulWidget {
   const GarageBagScreen({super.key});
@@ -31,7 +11,6 @@ class GarageBagScreen extends StatefulWidget {
 
 class _GarageBagScreenState extends State<GarageBagScreen> {
   
-  // Logic to group items by seller phone
   Map<String, List<CartItem>> get groupedItems {
     Map<String, List<CartItem>> groups = {};
     for (var item in garageBag) {
@@ -40,15 +19,14 @@ class _GarageBagScreenState extends State<GarageBagScreen> {
     return groups;
   }
 
-  void removeItem(int index) {
-    setState(() {
-      garageBag.removeAt(index);
-    });
-  }
-
   Future<void> _sendWhatsAppBundle(String phone, List<CartItem> items) async {
-    final String itemText = items.map((i) => "• ${i.title} (${i.scale}) - ₹${i.price}").join("\n");
-    final int total = items.fold(0, (sum, item) => sum + item.price);
+    // UPDATED: Label items as [TRADE ONLY] in the message if applicable
+    final String itemText = items.map((i) => i.isTradeOnly 
+        ? "• ${i.title} (${i.scale}) - [TRADE ONLY]" 
+        : "• ${i.title} (${i.scale}) - ₹${i.price}").join("\n");
+    
+    // Total only sums up non-trade items
+    final int total = items.where((i) => !i.isTradeOnly).fold(0, (sum, item) => sum + item.price);
     
     final message = "Hi! I'm interested in these models from your MiniGarage:\n\n$itemText\n\nTotal: ₹$total\nAre these still available?";
     
@@ -79,7 +57,6 @@ class _GarageBagScreenState extends State<GarageBagScreen> {
               itemBuilder: (context, index) {
                 String phone = groups.keys.elementAt(index);
                 List<CartItem> items = groups[phone]!;
-
                 return _buildSellerSection(phone, items);
               },
             ),
@@ -87,7 +64,8 @@ class _GarageBagScreenState extends State<GarageBagScreen> {
   }
 
   Widget _buildSellerSection(String phone, List<CartItem> items) {
-    int sectionTotal = items.fold(0, (sum, item) => sum + item.price);
+    // Only calculate total for items that ARE NOT trade only
+    int sectionTotal = items.where((i) => !i.isTradeOnly).fold(0, (sum, item) => sum + item.price);
 
     return Container(
       margin: const EdgeInsets.only(bottom: 24),
@@ -98,7 +76,6 @@ class _GarageBagScreenState extends State<GarageBagScreen> {
       ),
       child: Column(
         children: [
-          // Seller Header
           Padding(
             padding: const EdgeInsets.all(16),
             child: Row(
@@ -111,39 +88,33 @@ class _GarageBagScreenState extends State<GarageBagScreen> {
               ],
             ),
           ),
-          
-          // List of Cars from this Seller
           ...items.map((item) => _buildCartTile(item)).toList(),
+          _buildSectionFooter(phone, items, sectionTotal),
+        ],
+      ),
+    );
+  }
 
-          // Section Footer & WhatsApp Button
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: Colors.white.withOpacity(0.02),
-              borderRadius: const BorderRadius.vertical(bottom: Radius.circular(20)),
-            ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text("SUBTOTAL", style: TextStyle(color: Colors.grey, fontSize: 10)),
-                    Text("₹$sectionTotal", style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
-                  ],
-                ),
-                ElevatedButton.icon(
-                  onPressed: () => _sendWhatsAppBundle(phone, items),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF25D366),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  ),
-                  icon: const Icon(Icons.chat, size: 18, color: Colors.white),
-                  label: const Text("CONTACT SELLER", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                )
-              ],
-            ),
+  Widget _buildSectionFooter(String phone, List<CartItem> items, int total) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(color: Colors.white.withOpacity(0.02), borderRadius: const BorderRadius.vertical(bottom: Radius.circular(20))),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text("SUBTOTAL", style: TextStyle(color: Colors.grey, fontSize: 10)),
+              Text("₹$total", style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+            ],
           ),
+          ElevatedButton.icon(
+            onPressed: () => _sendWhatsAppBundle(phone, items),
+            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF25D366), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
+            icon: const Icon(Icons.chat, size: 18, color: Colors.white),
+            label: const Text("CONTACT SELLER", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+          )
         ],
       ),
     );
@@ -153,22 +124,23 @@ class _GarageBagScreenState extends State<GarageBagScreen> {
     return ListTile(
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       leading: Container(
-        width: 60,
-        height: 60,
+        width: 60, height: 60,
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(12),
           image: DecorationImage(image: NetworkImage(item.imageUrl), fit: BoxFit.cover),
         ),
       ),
       title: Text(item.title, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 14)),
-      subtitle: Text("Scale ${item.scale} • ₹${item.price}", style: const TextStyle(color: Colors.grey, fontSize: 12)),
+      // UPDATED: Hide price if it's a trade item
+      subtitle: Text(
+        item.isTradeOnly
+            ? "Scale ${item.scale} • TRADE ONLY" 
+            : "Scale ${item.scale} • ₹${item.price}", 
+        style: const TextStyle(color: Colors.grey, fontSize: 12)
+      ),
       trailing: IconButton(
         icon: const Icon(Icons.remove_circle_outline, color: Colors.redAccent, size: 20),
-        onPressed: () {
-          setState(() {
-            garageBag.removeWhere((i) => i.id == item.id);
-          });
-        },
+        onPressed: () => setState(() => garageBag.removeWhere((i) => i.id == item.id)),
       ),
     );
   }

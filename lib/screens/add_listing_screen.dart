@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -19,11 +20,25 @@ class _AddListingScreenState extends State<AddListingScreen> {
   final priceController = TextEditingController();
   final phoneController = TextEditingController();
   final otherBrandController = TextEditingController();
+  final subcategoryController = TextEditingController();
 
-  List<Uint8List> imageBytesList = []; // Replaces singular imageBytes
+  List<Uint8List> imageBytesList = [];
   String? selectedScale = '1:64';
   String? selectedBrand;
+  String selectedCondition = 'Mint (Carded)';
+  String selectedStatus = 'private'; // NEW: Default to Inventory
+  bool isFantasy = false; // NEW: Mainline vs Fantasy Toggle
   List<String> availableBrands = [];
+
+  // Options lists
+  final List<String> statusOptions = ['private', 'for_sale', 'trade_only'];
+  final List<String> conditionOptions = [
+    'Mint (Carded)',
+    'Near Mint (Carded)',
+    'Loose (Mint)',
+    'Loose (Played)',
+    'Damaged Packaging',
+  ];
 
   bool isUploading = false;
   bool isLoadingBrands = true;
@@ -38,7 +53,10 @@ class _AddListingScreenState extends State<AddListingScreen> {
 
   Future<void> _getBrands() async {
     try {
-      final data = await supabase.from('brands').select('name').order('name', ascending: true);
+      final data = await supabase
+          .from('brands')
+          .select('name')
+          .order('name', ascending: true);
       setState(() {
         availableBrands = List<String>.from(data.map((e) => e['name']));
         availableBrands.add("Other");
@@ -55,35 +73,39 @@ class _AddListingScreenState extends State<AddListingScreen> {
     }
   }
 
-  // --- AI SECTION: Uses the first image picked ---
   Future<void> autoFillWithAI() async {
     if (imageBytesList.isEmpty) return;
-
     setState(() => isAnalyzing = true);
 
     try {
       final model = GenerativeModel(
         model: 'gemini-1.5-flash',
-        apiKey: 'YOUR_API_KEY', 
+        apiKey: dotenv.env['GEMINI_API_KEY']!,
       );
 
-      final prompt = TextPart("Identify this die-cast car. Return JSON: {'brand': 'string', 'title': 'string', 'scale': 'string'}. Only return JSON.");
-      
-      // We send the first image (the hero shot) for analysis
-      final imagePart = DataPart('image/jpeg', imageBytesList.first);
+      // UPDATED PROMPT: Added is_fantasy detection
+      final prompt = TextPart(
+        "Identify this die-cast car. Return JSON: "
+        "{'brand': 'string', 'title': 'string', 'scale': 'string', 'subcategory': 'string', 'is_fantasy': bool}. "
+        "The 'subcategory' is the series name like 'Muscle Mania'. Set 'is_fantasy' to true if it is a concept or non-real-world car. Only return JSON.",
+      );
 
+      final imagePart = DataPart('image/jpeg', imageBytesList.first);
       final response = await model.generateContent([Content.multi([prompt, imagePart])]);
 
       if (response.text == null) return;
-
       final String cleanJson = response.text!.replaceAll('```json', '').replaceAll('```', '').trim();
       final Map<String, dynamic> result = jsonDecode(cleanJson);
 
       setState(() {
         titleController.text = result['title'] ?? "";
+        subcategoryController.text = result['subcategory'] ?? "";
+        isFantasy = result['is_fantasy'] ?? false; // Auto-detect Fantasy status
+
         if (['1:64', '1:43', '1:24', '1:18'].contains(result['scale'])) {
           selectedScale = result['scale'];
         }
+
         String detectedBrand = result['brand'] ?? "";
         bool brandExists = availableBrands.any((b) => b.toLowerCase() == detectedBrand.toLowerCase());
 
@@ -97,7 +119,7 @@ class _AddListingScreenState extends State<AddListingScreen> {
         }
       });
     } catch (e) {
-      _showError("AI could not read image.");
+      _showError("AI Scan failed. Please fill manually.");
     } finally {
       setState(() => isAnalyzing = false);
     }
@@ -109,7 +131,6 @@ class _AddListingScreenState extends State<AddListingScreen> {
       allowMultiple: true,
       withData: true,
     );
-
     if (result != null) {
       setState(() {
         imageBytesList = result.files.map((file) => file.bytes!).toList();
@@ -117,15 +138,16 @@ class _AddListingScreenState extends State<AddListingScreen> {
     }
   }
 
-  // --- UPLOAD SECTION: Handles multiple files ---
   Future<void> uploadListing() async {
     final String title = titleController.text.trim();
     final int? price = int.tryParse(priceController.text.trim());
     final String phone = phoneController.text.trim();
     final String finalBrand = isOtherSelected ? otherBrandController.text.trim() : (selectedBrand ?? "");
-
-    if (imageBytesList.isEmpty || title.isEmpty || price == null || phone.isEmpty || finalBrand.isEmpty) {
-      _showError("Please complete all fields and pick at least one photo");
+    
+    // VALIDATION: Price and Phone are optional if the status is 'private'
+    bool isPrivate = selectedStatus == 'private';
+    if (imageBytesList.isEmpty || title.isEmpty || finalBrand.isEmpty || (!isPrivate && (price == null || phone.isEmpty))) {
+      _showError("Please complete all required fields.");
       return;
     }
 
@@ -133,30 +155,26 @@ class _AddListingScreenState extends State<AddListingScreen> {
 
     try {
       List<String> uploadedUrls = [];
-
-      // Loop through all images and upload to Supabase
       for (int i = 0; i < imageBytesList.length; i++) {
         final fileName = '${DateTime.now().millisecondsSinceEpoch}_$i.jpg';
-        
         await supabase.storage.from('listing-images').uploadBinary(
-          fileName, 
-          imageBytesList[i],
-          fileOptions: const FileOptions(contentType: 'image/jpeg')
+          fileName, imageBytesList[i],
+          fileOptions: const FileOptions(contentType: 'image/jpeg'),
         );
-
-        final url = supabase.storage.from('listing-images').getPublicUrl(fileName);
-        uploadedUrls.add(url);
+        uploadedUrls.add(supabase.storage.from('listing-images').getPublicUrl(fileName));
       }
 
-      // Insert into DB using the 'image_urls' (array) column
       await supabase.from('listings').insert({
         'title': title,
-        'price': price,
+        'price': price ?? 0, // Default to 0 if private
         'scale': selectedScale,
         'brand': finalBrand,
+        'condition': selectedCondition,
+        'subcategory': subcategoryController.text.trim(),
+        'status': selectedStatus, // NEW
+        'is_fantasy': isFantasy, // NEW
         'seller_phone': phone,
-        'image_urls': uploadedUrls, // Saved as an array
-        'status': 'available',
+        'image_urls': uploadedUrls,
         'created_at': DateTime.now().toIso8601String(),
       });
 
@@ -176,7 +194,7 @@ class _AddListingScreenState extends State<AddListingScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xFF0F0F0F),
-      appBar: AppBar(title: const Text("LIST NEW CAR"), backgroundColor: Colors.transparent),
+      appBar: AppBar(title: const Text("ADD TO GARAGE"), backgroundColor: Colors.transparent),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(24),
         child: Center(
@@ -184,71 +202,44 @@ class _AddListingScreenState extends State<AddListingScreen> {
             constraints: const BoxConstraints(maxWidth: 600),
             child: Column(
               children: [
-                // MULTI-IMAGE PREVIEW
-                Stack(
-                  children: [
-                    GestureDetector(
-                      onTap: pickImages,
-                      child: Container(
-                        height: 300,
-                        width: double.infinity,
-                        decoration: BoxDecoration(
-                          color: Colors.white.withOpacity(0.05),
-                          borderRadius: BorderRadius.circular(20),
-                          border: Border.all(color: Colors.white10),
-                        ),
-                        child: imageBytesList.isEmpty
-                            ? const Center(child: Icon(Icons.add_a_photo, size: 50, color: Colors.blueAccent))
-                            : PageView.builder(
-                                itemCount: imageBytesList.length,
-                                itemBuilder: (context, index) {
-                                  return ClipRRect(
-                                    borderRadius: BorderRadius.circular(20),
-                                    child: Image.memory(imageBytesList[index], fit: BoxFit.cover),
-                                  );
-                                },
-                              ),
+                _buildImagePicker(),
+                const SizedBox(height: 30),
+
+                // NEW: Status Dropdown (Private/Sale/Trade)
+                DropdownButtonFormField<String>(
+                  value: selectedStatus,
+                  dropdownColor: Colors.grey[900],
+                  decoration: _inputDecoration("Garage Status"),
+                  items: statusOptions.map((s) => DropdownMenuItem(
+                    value: s,
+                    child: Text(
+                      s.toUpperCase().replaceAll('_', ' '),
+                      style: TextStyle(
+                        color: s == 'private' ? Colors.grey : Colors.blueAccent,
+                        fontWeight: FontWeight.bold,
                       ),
                     ),
-                    if (imageBytesList.isNotEmpty) ...[
-                      // AI Button
-                      Positioned(
-                        bottom: 15,
-                        right: 15,
-                        child: FloatingActionButton.extended(
-                          onPressed: isAnalyzing ? null : autoFillWithAI,
-                          backgroundColor: Colors.blueAccent,
-                          icon: isAnalyzing 
-                            ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
-                            : const Icon(Icons.auto_awesome, size: 18),
-                          label: Text(isAnalyzing ? "ANALYZING..." : "AI AUTO-FILL"),
-                        ),
-                      ),
-                      // Indicator for multiple images
-                      Positioned(
-                        top: 15,
-                        left: 15,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                          decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(10)),
-                          child: Text("${imageBytesList.length} Photos", style: const TextStyle(color: Colors.white, fontSize: 12)),
-                        ),
-                      ),
-                    ],
-                  ],
+                  )).toList(),
+                  onChanged: (val) => setState(() => selectedStatus = val!),
                 ),
 
-                const SizedBox(height: 30),
-                // Brands Dropdown
-                isLoadingBrands
-                    ? const LinearProgressIndicator()
-                    : DropdownButtonFormField<String>(
-                        value: availableBrands.contains(selectedBrand) ? selectedBrand : "Other",
-                        dropdownColor: Colors.grey[900],
-                        decoration: _inputDecoration("Brand"),
-                        items: availableBrands.map((brand) => DropdownMenuItem(value: brand, child: Text(brand, style: const TextStyle(color: Colors.white)))).toList(),
-                        onChanged: (val) => setState(() { selectedBrand = val; isOtherSelected = (val == "Other"); }),
-                      ),
+                const SizedBox(height: 15),
+
+                // NEW: Fantasy Toggle
+                SwitchListTile(
+                  title: const Text("Fantasy / Concept Car", style: TextStyle(color: Colors.white)),
+                  subtitle: const Text("Mark as non-real-world theme", style: TextStyle(color: Colors.grey, fontSize: 12)),
+                  value: isFantasy,
+                  activeColor: Colors.blueAccent,
+                  onChanged: (val) => setState(() => isFantasy = val),
+                ),
+
+                const SizedBox(height: 15),
+
+                _buildDropdown("Brand", availableBrands, selectedBrand, (val) => setState(() {
+                  selectedBrand = val;
+                  isOtherSelected = (val == "Other");
+                })),
 
                 if (isOtherSelected) ...[
                   const SizedBox(height: 15),
@@ -256,25 +247,28 @@ class _AddListingScreenState extends State<AddListingScreen> {
                 ],
 
                 const SizedBox(height: 15),
-                _buildTextField(titleController, "Model Name"),
+                _buildTextField(titleController, "Model Name (e.g. Porsche 911)"),
+                
+                const SizedBox(height: 15),
+                _buildTextField(subcategoryController, "Series / Sub-series (e.g. Exoticas)"),
+
                 const SizedBox(height: 15),
                 Row(
                   children: [
                     Expanded(child: _buildTextField(priceController, "Price (₹)", isNumber: true)),
                     const SizedBox(width: 15),
                     Expanded(
-                      child: DropdownButtonFormField<String>(
-                        value: selectedScale,
-                        dropdownColor: Colors.grey[900],
-                        decoration: _inputDecoration("Scale"),
-                        items: ['1:64', '1:43', '1:24', '1:18'].map((s) => DropdownMenuItem(value: s, child: Text(s))).toList(),
-                        onChanged: (val) => setState(() => selectedScale = val),
-                      ),
+                      child: _buildDropdown("Scale", ['1:64', '1:43', '1:24', '1:18'], selectedScale, (val) => setState(() => selectedScale = val)),
                     ),
                   ],
                 ),
+
+                const SizedBox(height: 15),
+                _buildDropdown("Condition", conditionOptions, selectedCondition, (val) => setState(() => selectedCondition = val!)),
+
                 const SizedBox(height: 15),
                 _buildTextField(phoneController, "WhatsApp Number", isNumber: true),
+                
                 const SizedBox(height: 40),
                 SizedBox(
                   width: double.infinity,
@@ -293,13 +287,67 @@ class _AddListingScreenState extends State<AddListingScreen> {
     );
   }
 
+  // --- UI Re-usable Components ---
+  Widget _buildImagePicker() => Stack(
+    children: [
+      GestureDetector(
+        onTap: pickImages,
+        child: Container(
+          height: 300,
+          width: double.infinity,
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.05),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: Colors.white10),
+          ),
+          child: imageBytesList.isEmpty
+              ? const Center(child: Icon(Icons.add_a_photo, size: 50, color: Colors.blueAccent))
+              : PageView.builder(
+                  itemCount: imageBytesList.length,
+                  itemBuilder: (context, i) => ClipRRect(
+                    borderRadius: BorderRadius.circular(20),
+                    child: Image.memory(imageBytesList[i], fit: BoxFit.cover),
+                  ),
+                ),
+        ),
+      ),
+      if (imageBytesList.isNotEmpty)
+        Positioned(
+          bottom: 15,
+          right: 15,
+          child: FloatingActionButton.extended(
+            onPressed: isAnalyzing ? null : autoFillWithAI,
+            backgroundColor: Colors.blueAccent,
+            icon: isAnalyzing
+                ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+                : const Icon(Icons.auto_awesome, size: 18),
+            label: Text(isAnalyzing ? "ANALYZING..." : "AI AUTO-FILL"),
+          ),
+        ),
+    ],
+  );
+
+  Widget _buildDropdown(String label, List<String> items, String? value, ValueChanged<String?> onChanged) => 
+    DropdownButtonFormField<String>(
+      value: items.contains(value) ? value : (items.isNotEmpty ? items[0] : null),
+      dropdownColor: Colors.grey[900],
+      decoration: _inputDecoration(label),
+      items: items.map((brand) => DropdownMenuItem(value: brand, child: Text(brand, style: const TextStyle(color: Colors.white)))).toList(),
+      onChanged: onChanged,
+    );
+
   InputDecoration _inputDecoration(String label) => InputDecoration(
-    labelText: label, filled: true, fillColor: Colors.white.withOpacity(0.05),
+    labelText: label,
+    filled: true,
+    fillColor: Colors.white.withOpacity(0.05),
     border: OutlineInputBorder(borderRadius: BorderRadius.circular(15)),
+    labelStyle: const TextStyle(color: Colors.grey),
   );
 
   Widget _buildTextField(TextEditingController controller, String label, {bool isNumber = false}) => TextField(
-    controller: controller, keyboardType: isNumber ? TextInputType.number : TextInputType.text,
-    style: const TextStyle(color: Colors.white), decoration: _inputDecoration(label),
+    controller: controller,
+    keyboardType: isNumber ? TextInputType.number : TextInputType.text,
+    style: const TextStyle(color: Colors.white),
+    decoration: _inputDecoration(label),
   );
 }

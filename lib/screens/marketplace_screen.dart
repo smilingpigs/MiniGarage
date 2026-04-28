@@ -1,10 +1,12 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:mini_garage/data/garage_data.dart';
 import 'package:mini_garage/screens/garage_bag_screen.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'dart:ui';
 import 'add_listing_screen.dart';
 import 'listing_detail_screen.dart';
+import 'my_inventory_screen.dart'; // Added for the new navigation button
 
 class MarketplaceScreen extends StatefulWidget {
   const MarketplaceScreen({super.key});
@@ -15,41 +17,57 @@ class MarketplaceScreen extends StatefulWidget {
 
 class _MarketplaceScreenState extends State<MarketplaceScreen> {
   final supabase = Supabase.instance.client;
-  String selectedScale = 'All'; // Current filter state
+  
+  String selectedView = 'Mainlines'; 
+  String selectedScale = 'All';
+  String selectedSort = 'Newest';
+  String selectedFilter = 'All'; 
 
-  // Getter for the filtered stream
-  String selectedSort = 'Newest'; // 'Price: Low to High', 'Price: High to Low'
-  String selectedBrand = 'All Brands';
-
+  // --- UPDATED: REFINED STREAM LOGIC ---
   Stream<List<Map<String, dynamic>>> get _listingsStream {
-    // 1. Use 'dynamic' to handle the changing types of the Supabase builders
-    dynamic query = supabase.from('listings').stream(primaryKey: ['id']);
+    bool lookingForFantasy = selectedView == 'Fantasy';
 
-    // 2. Chain the Scale Filter if needed
-    if (selectedScale != 'All') {
-      query = query.eq('scale', selectedScale);
-    }
+    // We use .eq() on the stream because it is server-side compatible.
+    // We handle .neq() and complex logic inside the .map() function.
+    return supabase
+        .from('listings')
+        .stream(primaryKey: ['id'])
+        .eq('is_fantasy', lookingForFantasy)
+        .map((list) {
+          final filteredList = list.where((item) {
+            // 1. Filter out 'private' items (Fixes the neq issue)
+            if (item['status'] == 'private') return false;
 
-    // 3. Chain the Brand Filter if needed
-    // This was likely the missing piece!
-    if (selectedBrand != 'All Brands') {
-      query = query.eq('brand', selectedBrand);
-    }
+            // 2. Scale Filter
+            if (selectedScale != 'All' && item['scale'] != selectedScale) return false;
 
-    // 4. Pass the fully filtered query to the sorting helper
-    return _applySort(query);
+            // 3. Dynamic Filter (Brand or Theme)
+            if (selectedFilter != 'All') {
+              if (lookingForFantasy) {
+                if (item['subcategory'] != selectedFilter) return false;
+              } else {
+                if (item['brand'] != selectedFilter) return false;
+              }
+            }
+            return true;
+          }).toList();
+
+          // 4. Apply Sorting
+          return _sortList(filteredList);
+        });
   }
 
-  // the sorting helper
-  Stream<List<Map<String, dynamic>>> _applySort(dynamic query) {
+  // Helper to handle list sorting client-side
+  List<Map<String, dynamic>> _sortList(List<Map<String, dynamic>> list) {
     if (selectedSort == 'Price: Low to High') {
-      return query.order('price', ascending: true);
+      list.sort((a, b) => (a['price'] ?? 0).compareTo(b['price'] ?? 0));
     } else if (selectedSort == 'Price: High to Low') {
-      return query.order('price', ascending: false);
+      list.sort((a, b) => (b['price'] ?? 0).compareTo(a['price'] ?? 0));
+    } else {
+      // Default: Newest first
+      list.sort((a, b) => (b['created_at'] ?? "").compareTo(a['created_at'] ?? ""));
     }
-
-    // Default: Newest first
-    return query.order('created_at', ascending: false);
+    return list;
   }
 
   @override
@@ -65,90 +83,43 @@ class _MarketplaceScreenState extends State<MarketplaceScreen> {
         backgroundColor: Colors.transparent,
         elevation: 0,
         actions: [
-          // Shopping Bag Icon with Badge
-          Stack(
-            alignment: Alignment.center,
-            children: [
-              IconButton(
-                icon: const Icon(
-                  Icons.shopping_bag_outlined,
-                  color: Colors.white,
-                ),
-                onPressed: () => Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (context) => const GarageBagScreen(),
-                  ),
-                ).then((value) => setState(() {})),
-              ),
-              if (garageBag.isNotEmpty)
-                Positioned(
-                  right: 8,
-                  top: 8,
-                  child: Container(
-                    padding: const EdgeInsets.all(2),
-                    decoration: BoxDecoration(
-                      color: Colors.redAccent,
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    constraints: const BoxConstraints(
-                      minWidth: 16,
-                      minHeight: 16,
-                    ),
-                    child: Text(
-                      '${garageBag.length}',
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 10,
-                        fontWeight: FontWeight.bold,
-                      ),
-                      textAlign: TextAlign.center,
-                    ),
-                  ),
-                ),
-            ],
-          ),
+          // --- NEW: INVENTORY BUTTON ---
           IconButton(
-            icon: const Icon(
-              Icons.add_circle_outline,
-              color: Colors.blueAccent,
-              size: 28,
-            ),
+            icon: const Icon(Icons.inventory_2_outlined, color: Colors.white70),
             onPressed: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const AddListingScreen()),
+              context, 
+              MaterialPageRoute(builder: (_) => const MyInventoryScreen())
             ),
+          ),
+          _buildBagButton(),
+          IconButton(
+            icon: const Icon(Icons.add_circle_outline, color: Colors.blueAccent, size: 28),
+            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AddListingScreen())),
           ),
         ],
       ),
-      // 1. Wrap the body in LayoutBuilder for accurate mobile detection
       body: LayoutBuilder(
         builder: (context, constraints) {
           final bool isMobile = constraints.maxWidth < 600;
-          final int crossAxisCount = isMobile
-              ? 2
-              : 5; // 2 for mobile, 5 for desktop
+          final int crossAxisCount = isMobile ? 2 : 5;
 
           return Column(
             children: [
-              _buildFilterBar(isMobile), // Now passing the argument correctly
+              _buildViewSwitcher(), 
+              _buildFilterBar(isMobile),
               Expanded(
                 child: StreamBuilder<List<Map<String, dynamic>>>(
                   stream: _listingsStream,
                   builder: (context, snapshot) {
                     if (snapshot.connectionState == ConnectionState.waiting) {
-                      return const Center(
-                        child: CircularProgressIndicator(
-                          color: Colors.blueAccent,
-                        ),
-                      );
+                      return const Center(child: CircularProgressIndicator(color: Colors.blueAccent));
                     }
 
                     if (!snapshot.hasData || snapshot.data!.isEmpty) {
-                      return const Center(
+                      return Center(
                         child: Text(
-                          "No cars in this category.",
-                          style: TextStyle(color: Colors.grey),
+                          "No $selectedView in the showroom yet.",
+                          style: const TextStyle(color: Colors.grey),
                         ),
                       );
                     }
@@ -161,9 +132,7 @@ class _MarketplaceScreenState extends State<MarketplaceScreen> {
                         crossAxisCount: crossAxisCount,
                         crossAxisSpacing: isMobile ? 12 : 20,
                         mainAxisSpacing: isMobile ? 12 : 20,
-                        childAspectRatio: isMobile
-                            ? 0.75
-                            : 0.85, // Taller cards for mobile
+                        childAspectRatio: isMobile ? 0.72 : 0.82, 
                       ),
                       itemCount: listings.length,
                       itemBuilder: (context, index) {
@@ -173,10 +142,7 @@ class _MarketplaceScreenState extends State<MarketplaceScreen> {
                           child: GestureDetector(
                             onTap: () => Navigator.push(
                               context,
-                              MaterialPageRoute(
-                                builder: (context) =>
-                                    ListingDetailScreen(car: car),
-                              ),
+                              MaterialPageRoute(builder: (context) => ListingDetailScreen(car: car)),
                             ).then((_) => setState(() {})),
                             child: CarListingCard(
                               car: car,
@@ -196,10 +162,51 @@ class _MarketplaceScreenState extends State<MarketplaceScreen> {
     );
   }
 
-  // Horizontal Scale Filter Bar
+  // The rest of the helper methods (Switcher, FilterBar, BagButton, Dropdown) 
+  // stay exactly the same as in your provided marketplace_screen.dart...
+  // [Truncated for brevity, but they should remain unchanged in your file]
+
+  Widget _buildViewSwitcher() {
+    return Padding(
+      padding: const EdgeInsets.only(top: 10),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: ['Mainlines', 'Fantasy'].map((view) {
+          bool isSelected = selectedView == view;
+          return GestureDetector(
+            onTap: () => setState(() {
+              selectedView = view;
+              selectedFilter = 'All'; 
+            }),
+            child: Container(
+              margin: const EdgeInsets.symmetric(horizontal: 5),
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+              decoration: BoxDecoration(
+                color: isSelected ? Colors.blueAccent : Colors.white.withOpacity(0.05),
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Text(
+                view,
+                style: TextStyle(
+                  color: isSelected ? Colors.white : Colors.grey,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 12,
+                ),
+              ),
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+
   Widget _buildFilterBar(bool isMobile) {
+    List<String> dynamicItems = selectedView == 'Mainlines' 
+      ? ['All', 'Hot Wheels', 'Bburago', 'Matchbox', 'Maisto']
+      : ['All', 'Glow-in-the-dark', 'Space', 'Tooned', 'Monster Trucks'];
+
     return Container(
-      height: isMobile ? 50 : 60, // Shorter bar on mobile
+      height: isMobile ? 50 : 60,
       margin: const EdgeInsets.symmetric(vertical: 10),
       child: ListView(
         scrollDirection: Axis.horizontal,
@@ -214,46 +221,25 @@ class _MarketplaceScreenState extends State<MarketplaceScreen> {
           ),
           const SizedBox(width: 8),
           _buildDropdown(
-            value: selectedBrand,
-            items: [
-              'All Brands',
-              'Hot Wheels',
-              'Bburago',
-              'Matchbox',
-              'Maisto',
-            ],
-            onChanged: (val) => setState(() => selectedBrand = val!),
-            icon: Icons.branding_watermark,
+            value: selectedFilter,
+            items: dynamicItems,
+            onChanged: (val) => setState(() => selectedFilter = val!),
+            icon: selectedView == 'Mainlines' ? Icons.branding_watermark : Icons.auto_awesome,
             isMobile: isMobile,
           ),
-
-          if (!isMobile) // Hide divider on small screens to save space
-            const VerticalDivider(
-              color: Colors.white10,
-              width: 40,
-              indent: 10,
-              endIndent: 10,
-            ),
-
+          const VerticalDivider(color: Colors.white10, width: 20),
           ...['All', '1:64', '1:43', '1:24', '1:18'].map((scale) {
             final isSelected = selectedScale == scale;
             return Padding(
               padding: const EdgeInsets.only(right: 6),
               child: FilterChip(
-                label: Text(
-                  scale,
-                  style: TextStyle(fontSize: isMobile ? 11 : 13),
-                ),
+                label: Text(scale, style: TextStyle(fontSize: isMobile ? 11 : 13)),
                 selected: isSelected,
                 onSelected: (val) => setState(() => selectedScale = scale),
                 selectedColor: Colors.blueAccent,
                 backgroundColor: Colors.white.withOpacity(0.05),
-                labelStyle: TextStyle(
-                  color: isSelected ? Colors.white : Colors.grey,
-                ),
-                visualDensity: isMobile
-                    ? VisualDensity.compact
-                    : VisualDensity.standard,
+                labelStyle: TextStyle(color: isSelected ? Colors.white : Colors.grey),
+                visualDensity: isMobile ? VisualDensity.compact : VisualDensity.standard,
               ),
             );
           }).toList(),
@@ -262,36 +248,38 @@ class _MarketplaceScreenState extends State<MarketplaceScreen> {
     );
   }
 
-  Widget _buildDropdown({
-    required String value,
-    required List<String> items,
-    required ValueChanged<String?> onChanged,
-    required IconData icon,
-    required bool isMobile,
-  }) {
+  Widget _buildBagButton() {
+    return Stack(
+      alignment: Alignment.center,
+      children: [
+        IconButton(
+          icon: const Icon(Icons.shopping_bag_outlined, color: Colors.white),
+          onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => const GarageBagScreen())).then((value) => setState(() {})),
+        ),
+        if (garageBag.isNotEmpty)
+          Positioned(
+            right: 8, top: 8,
+            child: Container(
+              padding: const EdgeInsets.all(2),
+              decoration: BoxDecoration(color: Colors.redAccent, borderRadius: BorderRadius.circular(10)),
+              constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
+              child: Text('${garageBag.length}', style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold), textAlign: TextAlign.center),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildDropdown({required String value, required List<String> items, required ValueChanged<String?> onChanged, required IconData icon, required bool isMobile}) {
     return Container(
       padding: EdgeInsets.symmetric(horizontal: isMobile ? 8 : 12),
-      decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.05),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.white10),
-      ),
+      decoration: BoxDecoration(color: Colors.white.withOpacity(0.05), borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.white10)),
       child: DropdownButtonHideUnderline(
         child: DropdownButton<String>(
           value: value,
           icon: Icon(icon, size: isMobile ? 14 : 16, color: Colors.blueAccent),
           dropdownColor: const Color(0xFF1A1A1A),
-          items: items
-              .map(
-                (e) => DropdownMenuItem(
-                  value: e,
-                  child: Text(
-                    e,
-                    style: TextStyle(fontSize: isMobile ? 11 : 13),
-                  ),
-                ),
-              )
-              .toList(),
+          items: items.map((e) => DropdownMenuItem(value: e, child: Text(e, style: TextStyle(fontSize: isMobile ? 11 : 13)))).toList(),
           onChanged: onChanged,
         ),
       ),
@@ -299,21 +287,21 @@ class _MarketplaceScreenState extends State<MarketplaceScreen> {
   }
 }
 
+
 class CarListingCard extends StatelessWidget {
   final Map<String, dynamic> car;
-  final VoidCallback onBagTapped; // Callback to refresh the UI
+  final VoidCallback onBagTapped;
 
-  const CarListingCard({
-    super.key,
-    required this.car,
-    required this.onBagTapped,
-  });
+  const CarListingCard({super.key, required this.car, required this.onBagTapped});
 
   @override
   Widget build(BuildContext context) {
-    // Check if car is already in the bag
     bool inBag = garageBag.any((item) => item.id == car['id'].toString());
     final List<String> carImages = List<String>.from(car['image_urls'] ?? []);
+    
+    // NEW: Logic to handle 'Trade Only' vs 'Price'
+    bool isTradeOnly = car['status'] == 'trade_only';
+
     return Container(
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(24),
@@ -323,31 +311,23 @@ class CarListingCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(24),
         child: Stack(
           children: [
-            // Image
             Positioned.fill(
               child: Image.network(
-                carImages.isNotEmpty
-                    ? carImages.first
-                    : "", // Take the first one for the thumbnail
+                carImages.isNotEmpty ? carImages.first : "",
                 fit: BoxFit.cover,
-                errorBuilder: (context, error, stackTrace) =>
-                    const Icon(Icons.directions_car),
+                errorBuilder: (context, error, stackTrace) => const Icon(Icons.directions_car, color: Colors.white10),
               ),
             ),
-
-            // Info & Add Button Bar
             Align(
               alignment: Alignment.bottomCenter,
               child: ClipRect(
                 child: BackdropFilter(
                   filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
                   child: Container(
-                    padding: const EdgeInsets.all(12),
+                    padding: const EdgeInsets.all(10),
                     decoration: BoxDecoration(
                       color: Colors.black.withOpacity(0.5),
-                      border: Border(
-                        top: BorderSide(color: Colors.white.withOpacity(0.1)),
-                      ),
+                      border: Border(top: BorderSide(color: Colors.white.withOpacity(0.1))),
                     ),
                     child: Row(
                       children: [
@@ -360,44 +340,35 @@ class CarListingCard extends StatelessWidget {
                                 car['title'],
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  color: Colors.white,
-                                ),
+                                style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white, fontSize: 13),
                               ),
                               const SizedBox(height: 4),
-                              Text(
-                                "₹${car['price']}",
-                                style: const TextStyle(
-                                  color: Colors.blueAccent,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
+                              // NEW: Display Price or Trade Badge
+                              isTradeOnly 
+                                ? Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                    decoration: BoxDecoration(color: Colors.orangeAccent.withOpacity(0.2), borderRadius: BorderRadius.circular(4)),
+                                    child: const Text("TRADE ONLY", style: TextStyle(color: Colors.orangeAccent, fontSize: 10, fontWeight: FontWeight.bold)),
+                                  )
+                                : Text("₹${car['price']}", style: const TextStyle(color: Colors.blueAccent, fontWeight: FontWeight.bold, fontSize: 12)),
                             ],
                           ),
                         ),
-
-                        // NEW: Quick Add Button
                         GestureDetector(
                           onTap: () {
                             if (!inBag) {
-                              garageBag.add(
-                                CartItem(
-                                  id: car['id'].toString(),
-                                  title: car['title'],
-                                  price: car['price'],
-                                  imageUrl: car['image_url'],
-                                  sellerPhone:
-                                      car['seller_phone'] ?? "No Phone",
-                                  scale: car['scale'] ?? "1:64",
-                                ),
-                              );
+                              garageBag.add(CartItem(
+                                id: car['id'].toString(),
+                                title: car['title'],
+                                price: car['price'],
+                                imageUrl: carImages.isNotEmpty ? carImages.first : "",
+                                sellerPhone: car['seller_phone'] ?? "No Phone",
+                                scale: car['scale'] ?? "1:64",
+                              ));
                             } else {
-                              garageBag.removeWhere(
-                                (item) => item.id == car['id'].toString(),
-                              );
+                              garageBag.removeWhere((item) => item.id == car['id'].toString());
                             }
-                            onBagTapped(); // Tell the screen to rebuild
+                            onBagTapped();
                           },
                           child: AnimatedContainer(
                             duration: const Duration(milliseconds: 200),
@@ -406,11 +377,7 @@ class CarListingCard extends StatelessWidget {
                               color: inBag ? Colors.green : Colors.blueAccent,
                               borderRadius: BorderRadius.circular(12),
                             ),
-                            child: Icon(
-                              inBag ? Icons.check : Icons.add_shopping_cart,
-                              color: Colors.white,
-                              size: 18,
-                            ),
+                            child: Icon(inBag ? Icons.check : Icons.add_shopping_cart, color: Colors.white, size: 16),
                           ),
                         ),
                       ],
