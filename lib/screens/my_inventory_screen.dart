@@ -13,13 +13,16 @@ class _MyInventoryScreenState extends State<MyInventoryScreen> {
   final TextEditingController _searchController = TextEditingController();
   String _searchQuery = "";
 
+  // Tracks status changes locally for instant visual confirmation
   final Map<String, String> _optimisticStatuses = {};
 
+  // Streams your uploads directly from Supabase ordered by newest first
   Stream<List<Map<String, dynamic>>> get _inventoryStream => supabase
       .from('listings')
       .stream(primaryKey: ['id'])
       .order('created_at', ascending: false);
 
+  // Updates the database status column when a tile option is selected
   Future<void> _updateStatus(
     String id,
     String newStatus,
@@ -49,7 +52,7 @@ class _MyInventoryScreenState extends State<MyInventoryScreen> {
     }
   }
 
-  // --- NEW: DELETE LOGIC ---
+  // Permanently removes a vehicle configuration from the database
   Future<void> _deleteListing(String id) async {
     try {
       await supabase.from('listings').delete().eq('id', id);
@@ -127,6 +130,7 @@ class _MyInventoryScreenState extends State<MyInventoryScreen> {
             preferredSize: const Size.fromHeight(110),
             child: Column(
               children: [
+                // Search Input Layer
                 Padding(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 16,
@@ -154,6 +158,7 @@ class _MyInventoryScreenState extends State<MyInventoryScreen> {
                     ),
                   ),
                 ),
+                // Categorization Tabs
                 const TabBar(
                   indicatorColor: Colors.blueAccent,
                   labelStyle: TextStyle(
@@ -172,11 +177,13 @@ class _MyInventoryScreenState extends State<MyInventoryScreen> {
         body: StreamBuilder<List<Map<String, dynamic>>>(
           stream: _inventoryStream,
           builder: (context, snapshot) {
-            if (!snapshot.hasData)
+            if (!snapshot.hasData) {
               return const Center(
                 child: CircularProgressIndicator(color: Colors.blueAccent),
               );
+            }
 
+            // Real-time local filtering logic based on your search field input
             final allItems = snapshot.data!.where((item) {
               return item['title'].toString().toLowerCase().contains(
                 _searchQuery,
@@ -203,104 +210,132 @@ class _MyInventoryScreenState extends State<MyInventoryScreen> {
   }
 
   Widget _buildInventoryList(List<Map<String, dynamic>> items, bool isFantasy) {
-    if (items.isEmpty)
+    if (items.isEmpty) {
       return const Center(
         child: Text(
           "No matching cars found.",
           style: TextStyle(color: Colors.grey),
         ),
       );
+    }
 
-    return ListView.builder(
-      padding: const EdgeInsets.all(16),
-      itemCount: items.length,
-      itemBuilder: (context, index) {
-        final item = items[index];
-        final String id = item['id'].toString();
-        final List<String> images = List<String>.from(item['image_urls'] ?? []);
+    // Determine layout dynamically based on screen constraint width
+    final bool isMobile = MediaQuery.of(context).size.width < 768;
 
-        final String serverStatus = item['status'] ?? 'private';
-        final String currentStatus = _optimisticStatuses[id] ?? serverStatus;
+    if (isMobile) {
+      return ListView.builder(
+        padding: const EdgeInsets.all(16),
+        itemCount: items.length,
+        itemBuilder: (context, index) {
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 16),
+            child: _buildInventoryCard(items[index], isFantasy),
+          );
+        },
+      );
+    } else {
+      return GridView.builder(
+        padding: const EdgeInsets.all(16),
+        itemCount: items.length,
+        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: 3, // Three elegant items per row on Web layout
+          crossAxisSpacing: 16,
+          mainAxisSpacing: 16,
+          mainAxisExtent: 155, // Ensures perfect proportional content heights
+        ),
+        itemBuilder: (context, index) {
+          return _buildInventoryCard(items[index], isFantasy);
+        },
+      );
+    }
+  }
 
-        return Container(
-          margin: const EdgeInsets.only(bottom: 16),
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: Colors.white.withOpacity(0.03),
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: Colors.white10),
-          ),
-          child: Column(
-            children: [
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: ClipRRect(
-                  borderRadius: BorderRadius.circular(12),
-                  child: Image.network(
-                    images.isNotEmpty ? images.first : "",
-                    width: 60,
-                    height: 60,
-                    fit: BoxFit.cover,
-                    errorBuilder: (context, e, s) =>
-                        const Icon(Icons.directions_car, color: Colors.white10),
-                  ),
-                ),
-                title: Text(
-                  item['title'].toString().toUpperCase(),
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 14,
-                  ),
-                ),
-                subtitle: Text(
-                  isFantasy
-                      ? "Theme: ${item['subcategory'] ?? 'Fantasy'}"
-                      : "Brand: ${item['brand'] ?? 'Mainline'}",
-                  style: const TextStyle(color: Colors.grey, fontSize: 11),
-                ),
-                // --- DELETE BUTTON ---
-                trailing: IconButton(
-                  icon: const Icon(
-                    Icons.delete_outline,
-                    color: Colors.redAccent,
-                    size: 22,
-                  ),
-                  onPressed: () => _showDeleteConfirmation(id, item['title']),
-                ),
+  // Extracted Component Card UI to prevent duplicate configuration logic
+  Widget _buildInventoryCard(Map<String, dynamic> item, bool isFantasy) {
+    final String id = item['id'].toString();
+    final List<String> images = List<String>.from(item['image_urls'] ?? []);
+
+    final String serverStatus = item['status'] ?? 'private';
+    final String currentStatus = _optimisticStatuses[id] ?? serverStatus;
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.03),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white10),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: Image.network(
+                images.isNotEmpty ? images.first : "",
+                width: 60,
+                height: 60,
+                fit: BoxFit.cover,
+                errorBuilder: (context, e, s) =>
+                    const Icon(Icons.directions_car, color: Colors.white10),
               ),
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  _statusButton(
-                    id,
-                    'private',
-                    "PRIVATE",
-                    currentStatus,
-                    serverStatus,
-                  ),
-                  const SizedBox(width: 8),
-                  _statusButton(
-                    id,
-                    'for_sale',
-                    "SELL",
-                    currentStatus,
-                    serverStatus,
-                  ),
-                  const SizedBox(width: 8),
-                  _statusButton(
-                    id,
-                    'trade_only',
-                    "TRADE",
-                    currentStatus,
-                    serverStatus,
-                  ),
-                ],
+            ),
+            title: Text(
+              item['title'].toString().toUpperCase(),
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+                fontSize: 14,
+              ),
+            ),
+            subtitle: Text(
+              isFantasy
+                  ? "Theme: ${item['subcategory'] ?? 'Fantasy'}"
+                  : "Brand: ${item['brand'] ?? 'Mainline'}",
+              style: const TextStyle(color: Colors.grey, fontSize: 11),
+            ),
+            trailing: IconButton(
+              icon: const Icon(
+                Icons.delete_outline,
+                color: Colors.redAccent,
+                size: 22,
+              ),
+              onPressed: () => _showDeleteConfirmation(id, item['title']),
+            ),
+          ),
+          const SizedBox(height: 12),
+
+          // --- MARKETPLACE SELECTION BAR ---
+          Row(
+            children: [
+              _statusButton(
+                id,
+                'private',
+                "PRIVATE",
+                currentStatus,
+                serverStatus,
+              ),
+              const SizedBox(width: 8),
+              _statusButton(
+                id,
+                'for_sale',
+                "SELL",
+                currentStatus,
+                serverStatus,
+              ),
+              const SizedBox(width: 8),
+              _statusButton(
+                id,
+                'trade_only',
+                "TRADE",
+                currentStatus,
+                serverStatus,
               ),
             ],
           ),
-        );
-      },
+        ],
+      ),
     );
   }
 
